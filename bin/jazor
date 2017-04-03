@@ -55,6 +55,10 @@ OptionParser.new do |opts|
     options[:quirks_mode] = true
   end
 
+  opts.on("-l", "--one-per-line", 'Read one JSON object per line of source') do
+    options[:one_per_line] = true
+  end
+
   opts.on_tail("-h", "--help", "Show this message") do
     puts opts.help
     exit
@@ -77,47 +81,54 @@ parse_options = {
 
 begin
 
-  obj = if STDIN.fcntl(Fcntl::F_GETFL, 0) == 0
+  io = if STDIN.fcntl(Fcntl::F_GETFL, 0) == 0
     Jazor::LOG.debug("Reading JSON from STDIN")
-    Jazor::parse(STDIN.read, parse_options)
+    STDIN
   elsif !ARGV[0].nil?
     if ARGV[0] =~ /^#{URI::regexp}$/
       Jazor::LOG.debug("Reading JSON from URI: #{ARGV[0]}")
-      Jazor::parse(Jazor::RestClient.send(options[:rest_request], ARGV.shift, options[:rest_headers], options[:rest_data]).body, parse_options)
+      StringIO.new(Jazor::RestClient.send(options[:rest_request], ARGV.shift, options[:rest_headers], options[:rest_data]).body)
     elsif File.readable?(ARGV[0])
       Jazor::LOG.debug("Reading JSON from file: #{ARGV[0]}")
-      Jazor::parse(IO.read(ARGV.shift), parse_options)
+      File.new(ARGV.shift)
     else
       Jazor::LOG.debug("Reading JSON from ARGV: #{ARGV[0]}")
-      Jazor::parse(ARGV.shift, parse_options)
+      StringIO.new(ARGV.shift)
     end
   end
 
-  (ARGV.length > 0 ? ARGV[0..ARGV.length] : [nil]).each do |expression|
-    result = Jazor::evaluate(obj, expression)
+  while json_str = (options[:one_per_line] ? io.gets : io.read)
+    obj = Jazor::parse(json_str, parse_options)
 
-    if options[:sort] && result.respond_to?(:sort)
-      result = if result.respond_to?(:keys) && result.respond_to?(:values)
-        Hash[result.sort]
+    (ARGV.length > 0 ? ARGV[0..ARGV.length] : [nil]).each do |expression|
+      result = Jazor::evaluate(obj, expression)
+      Jazor::LOG.debug("Expression (#{expression}) returns a #{result.class}")
+
+      if options[:sort] && result.respond_to?(:sort)
+        result = if result.respond_to?(:keys) && result.respond_to?(:values)
+          Hash[result.sort]
+        else
+          result.sort { |a,b| a.to_s <=> b.to_s }
+        end
+      end
+
+      if options[:test]
+        if result
+          Jazor::LOG.info("Test passed: #{expression} => #{[Hash, Array].include?(result.class) ? result.to_json : result}")
+        else
+          Jazor::LOG.error("Test failed: #{expression} => #{[Hash, Array].include?(result.class) ? result.to_json : result}")
+          exit(1)
+        end
       else
-        result.sort{ |a,b| a.to_s <=> b.to_s }
+        if [Hash, Array].include?(result.class)
+          puts options[:colorize] ? Jazor::colorize(JSON.pretty_generate(result)) : JSON.pretty_generate(result)
+        else
+          puts result
+        end
       end
     end
 
-    if options[:test]
-      if result
-        Jazor::LOG.info("Test passed: #{expression} => #{[Hash, Array].include?(result.class) ? result.to_json : result}")
-      else
-        Jazor::LOG.error("Test failed: #{expression} => #{[Hash, Array].include?(result.class) ? result.to_json : result}")
-        exit(1)
-      end
-    else
-      if [Hash, Array].include?(result.class)
-        puts options[:colorize] ? Jazor::colorize(JSON.pretty_generate(result)) : JSON.pretty_generate(result)
-      else
-        puts result
-      end
-    end
+    break unless options[:one_per_line]
   end
 
 rescue StandardError => e
